@@ -481,7 +481,634 @@ function determineEffectiveBounds_(sheet, grid) {
 }
 
 function classifyCell_(r, c, grid, bounds) {
-  if (hasTex…5364 tokens truncated…'指定テキストを含むセルが見つかりません。'
+  if (hasText_(grid.formulasR1C1[r][c])) {
+    return {
+      type: AUTO_GRADER.types.formula,
+      label: '数式セル',
+      reasons: []
+    };
+  }
+
+  if (!isBlankValue_(grid.values[r][c], grid.displayValues[r][c])) {
+    return {
+      type: AUTO_GRADER.types.value,
+      label: '値セル',
+      reasons: []
+    };
+  }
+
+  const reasons = inputLikeReasons_(r, c, grid, bounds);
+  if (reasons.length > 0) {
+    return {
+      type: AUTO_GRADER.types.inputLike,
+      label: '入力欄っぽいセル',
+      reasons: reasons
+    };
+  }
+
+  return {
+    type: AUTO_GRADER.types.blank,
+    label: '空欄セル',
+    reasons: []
+  };
+}
+
+function shouldTargetCell_(cell, rule, explicitRanges) {
+  const hasExplicitRange = explicitRanges.length > 0;
+  if (hasExplicitRange && !cell.inExplicitRange) {
+    return false;
+  }
+
+  if (rule.targetMode === AUTO_GRADER.targetModes.explicitOnly) {
+    return hasExplicitRange && cell.inExplicitRange;
+  }
+  if (rule.targetMode === AUTO_GRADER.targetModes.formulaOnly) {
+    return cell.type === AUTO_GRADER.types.formula;
+  }
+  if (rule.targetMode === AUTO_GRADER.targetModes.formulaAndValue) {
+    return cell.type === AUTO_GRADER.types.formula || cell.type === AUTO_GRADER.types.value;
+  }
+  if (rule.targetMode === AUTO_GRADER.targetModes.valueOnly) {
+    return cell.type === AUTO_GRADER.types.value;
+  }
+  if (rule.targetMode === AUTO_GRADER.targetModes.all) {
+    return true;
+  }
+  return cell.type === AUTO_GRADER.types.formula;
+}
+
+function shouldReportCell_(cell, settings, rule) {
+  if (cell.isTarget) {
+    return true;
+  }
+  if (rule.scope === AUTO_GRADER.scope.reference && !settings.includeReferenceInResults) {
+    return false;
+  }
+  if (cell.type === AUTO_GRADER.types.inputLike) {
+    return settings.includeInputLikeCellsInResults;
+  }
+  if (cell.type === AUTO_GRADER.types.blank) {
+    return settings.includeBlankCellsInResults;
+  }
+  return false;
+}
+
+function inputLikeReasons_(r, c, grid, bounds) {
+  const reasons = [];
+  if (grid.dataValidations[r][c]) {
+    reasons.push('入力規則');
+  }
+  if (hasText_(grid.notes[r][c])) {
+    reasons.push('メモ');
+  }
+  if (isNonDefaultBackground_(grid.backgrounds[r][c])) {
+    reasons.push('背景色 ' + grid.backgrounds[r][c]);
+  }
+  if (isNonDefaultNumberFormat_(grid.numberFormats[r][c])) {
+    reasons.push('表示形式 ' + grid.numberFormats[r][c]);
+  }
+  if (isInteriorBlank_(r, c, grid, bounds)) {
+    reasons.push('表内空欄');
+  }
+  return reasons;
+}
+
+function hasCellSignal_(r, c, grid) {
+  return hasText_(grid.formulasR1C1[r][c]) ||
+    !isBlankValue_(grid.values[r][c], grid.displayValues[r][c]) ||
+    hasText_(grid.notes[r][c]) ||
+    Boolean(grid.dataValidations[r][c]) ||
+    isNonDefaultBackground_(grid.backgrounds[r][c]) ||
+    isNonDefaultNumberFormat_(grid.numberFormats[r][c]);
+}
+
+function isInteriorBlank_(r, c, grid, bounds) {
+  const hasLeft = hasContentInRow_(r, 0, c - 1, grid);
+  const hasRight = hasContentInRow_(r, c + 1, bounds.colCount - 1, grid);
+  const hasAbove = hasContentInCol_(c, 0, r - 1, grid);
+  const hasBelow = hasContentInCol_(c, r + 1, bounds.rowCount - 1, grid);
+  return (hasLeft && hasRight) || (hasAbove && hasBelow);
+}
+
+function hasContentInRow_(r, fromCol, toCol, grid) {
+  for (let c = Math.max(0, fromCol); c <= toCol; c++) {
+    if (cellHasVisibleContent_(r, c, grid)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasContentInCol_(c, fromRow, toRow, grid) {
+  for (let r = Math.max(0, fromRow); r <= toRow; r++) {
+    if (cellHasVisibleContent_(r, c, grid)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function cellHasVisibleContent_(r, c, grid) {
+  if (r < 0 || c < 0 || r >= grid.rowCount || c >= grid.colCount) {
+    return false;
+  }
+  return hasText_(grid.formulasR1C1[r][c]) ||
+    !isBlankValue_(grid.values[r][c], grid.displayValues[r][c]);
+}
+
+function allocatePoints_(analyses, freeformRules, settings) {
+  const scoreItems = [];
+  analyses.forEach(function(analysis) {
+    if (analysis.rule.scope === AUTO_GRADER.scope.scored && analysis.targetCells.length > 0) {
+      scoreItems.push({
+        kind: 'analysis',
+        item: analysis,
+        specifiedPoints: analysis.rule.specifiedPoints
+      });
+    }
+  });
+  freeformRules.forEach(function(rule) {
+    if (rule.scope === AUTO_GRADER.scope.scored) {
+      scoreItems.push({
+        kind: 'freeform',
+        item: rule,
+        specifiedPoints: rule.specifiedPoints
+      });
+    }
+  });
+
+  if (scoreItems.length === 0) {
+    return;
+  }
+
+  const specifiedTotal = scoreItems.reduce(function(sum, item) {
+    return sum + (item.specifiedPoints === null ? 0 : item.specifiedPoints);
+  }, 0);
+  const unspecified = scoreItems.filter(function(item) {
+    return item.specifiedPoints === null;
+  });
+  const unspecifiedPoint = unspecified.length > 0
+    ? Math.max(0, settings.totalScore - specifiedTotal) / unspecified.length
+    : 0;
+
+  scoreItems.forEach(function(item) {
+    const points = item.specifiedPoints === null ? unspecifiedPoint : item.specifiedPoints;
+    item.item.allocatedPoints = points;
+    if (item.kind === 'analysis' && item.item.targetCells.length > 0) {
+      const cellPoint = points / item.item.targetCells.length;
+      item.item.targetCells.forEach(function(cell) {
+        cell.cellPoint = cellPoint;
+      });
+    }
+  });
+}
+
+function writeSpecSheet_(job) {
+  const sheet = ensureSheet_(job.controller, AUTO_GRADER.sheets.spec);
+  sheet.clear();
+
+  const answerName = job.answerSpreadsheet ? job.answerSpreadsheet.getName() : '使用しない';
+  const metaRows = [
+    ['生成日時', new Date(), '模範解答スプレッドシート', answerName, '満点', job.maxPoints],
+    ['既定の採点対象セル', job.settings.defaultTargetMode, '解析上限', job.settings.scanMaxRows + '行 x ' + job.settings.scanMaxCols + '列', '備考', '配点空欄の採点項目に残り点を自動配分'],
+    ['', '', '', '', '', '']
+  ];
+  sheet.getRange(1, 1, metaRows.length, metaRows[0].length).setValues(metaRows);
+
+  const headers = [
+    '種別',
+    '区分',
+    '模範解答シート',
+    '生徒シート',
+    'セル',
+    '採点対象',
+    '配点',
+    'セル配点',
+    '採点対象セル',
+    '分類/チェック',
+    '入力欄判定理由',
+    '期待値/条件',
+    '期待値（内部値）',
+    '期待数式R1C1',
+    '表示形式',
+    'メモ/備考'
+  ];
+  const rows = [];
+
+  job.analyses.forEach(function(analysis) {
+    analysis.outputCells.forEach(function(cell) {
+      rows.push([
+        '模範解答',
+        analysis.rule.scopeLabel,
+        analysis.rule.answerSheetName,
+        analysis.rule.studentSheetName || '同名',
+        cell.a1,
+        cell.isTarget,
+        analysis.allocatedPoints,
+        cell.cellPoint,
+        analysis.rule.targetModeLabel,
+        cell.typeLabel,
+        cell.inputReasons,
+        cell.expectedDisplayValue,
+        valueForOutput_(cell.expectedRawValue),
+        cell.expectedFormulaR1C1,
+        cell.expectedNumberFormat,
+        cell.note || analysis.rule.note
+      ]);
+    });
+  });
+
+  job.freeformRules.forEach(function(rule) {
+    rows.push([
+      '自由課題チェック',
+      rule.scopeLabel,
+      '',
+      rule.targetSheetSpec || 'すべて',
+      '',
+      rule.scope === AUTO_GRADER.scope.scored,
+      rule.allocatedPoints,
+      rule.allocatedPoints,
+      '',
+      rule.checkTypeLabel,
+      '',
+      freeformExpectedLabel_(rule),
+      '',
+      '',
+      '',
+      rule.note
+    ]);
+  });
+
+  sheet.getRange(4, 1, 1, headers.length).setValues([headers]);
+  if (rows.length > 0) {
+    sheet.getRange(5, 1, rows.length, headers.length).setValues(rows);
+  }
+
+  sheet.getRange(4, 1, 1, headers.length).setFontWeight('bold').setBackground('#fff2cc');
+  sheet.setFrozenRows(4);
+  sheet.autoResizeColumns(1, headers.length);
+}
+
+function readSubmissionRows_(controller) {
+  const sheet = controller.getSheetByName(AUTO_GRADER.sheets.submissions);
+  if (!sheet || sheet.getLastRow() < 2) {
+    throw new Error('提出URL一覧に提出スプレッドシートURLを入力してください。');
+  }
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(4, sheet.getLastColumn());
+  const range = sheet.getRange(2, 1, lastRow - 1, lastCol);
+  const values = range.getDisplayValues();
+  const richTexts = range.getRichTextValues();
+  const rows = [];
+
+  for (let i = 0; i < values.length; i++) {
+    const nameText = String(values[i][0] || '').trim();
+    const urlFromB = extractSpreadsheetUrl_(values[i][1]) || richTextUrl_(richTexts[i][1]);
+    const urlFromA = extractSpreadsheetUrl_(values[i][0]) || richTextUrl_(richTexts[i][0]);
+    const url = urlFromB || urlFromA;
+    const sheetName = String(values[i][2] || '').trim();
+
+    if (!url) {
+      continue;
+    }
+
+    rows.push({
+      studentName: urlFromA && !urlFromB ? '' : nameText,
+      url: cleanSpreadsheetUrl_(url),
+      singleSheetOverride: sheetName,
+      sourceRow: i + 2
+    });
+  }
+
+  if (rows.length === 0) {
+    throw new Error('提出URL一覧に有効なスプレッドシートURLが見つかりません。');
+  }
+  return rows;
+}
+
+function gradeSubmissionRows_(submissions, job) {
+  const resultRows = [];
+  const summaryRows = [];
+
+  submissions.forEach(function(submission) {
+    const summary = createSummary_(submission, job.maxPoints);
+
+    try {
+      const spreadsheet = SpreadsheetApp.openByUrl(submission.url);
+      const studentName = submission.studentName || spreadsheet.getName();
+      summary.studentName = studentName;
+
+      job.analyses.forEach(function(analysis) {
+        gradeAnalysisForSubmission_(spreadsheet, submission, studentName, analysis, job.settings, summary, resultRows);
+      });
+
+      job.freeformRules.forEach(function(rule) {
+        gradeFreeformForSubmission_(spreadsheet, submission, studentName, rule, job.settings, summary, resultRows);
+      });
+    } catch (error) {
+      summary.errors.push(error.message);
+      summary.possiblePoints = summary.maxPoints;
+      resultRows.push(resultRow_({
+        studentName: submission.studentName,
+        url: submission.url,
+        scopeLabel: 'エラー',
+        unitName: '',
+        answerSheetName: '',
+        studentSheetName: '',
+        cell: '',
+        category: '',
+        judgementLabel: 'エラー',
+        correct: false,
+        points: 0,
+        earnedPoints: 0,
+        expected: '',
+        actual: '',
+        expectedFormula: '',
+        actualFormula: '',
+        detail: error.message
+      }));
+    }
+
+    summaryRows.push(summaryToRow_(summary));
+  });
+
+  return {
+    resultRows: resultRows,
+    summaryRows: summaryRows
+  };
+}
+
+function gradeAnalysisForSubmission_(spreadsheet, submission, studentName, analysis, settings, summary, resultRows) {
+  try {
+    const studentSheet = chooseStudentSheetForRule_(spreadsheet, analysis.rule, submission);
+    const submittedGrid = readSubmittedGrid_(studentSheet, analysis.bounds);
+
+    analysis.resultCells.forEach(function(expectedCell) {
+      const shouldScore = expectedCell.isTarget && analysis.rule.scope === AUTO_GRADER.scope.scored;
+      const shouldOutput = shouldScore || analysis.rule.scope === AUTO_GRADER.scope.scored || settings.includeReferenceInResults;
+      if (!shouldOutput) {
+        return;
+      }
+
+      const actualCell = getGridCell_(submittedGrid, expectedCell.row, expectedCell.col);
+      const judgement = judgeCell_(expectedCell, actualCell, settings);
+      const points = shouldScore ? expectedCell.cellPoint : 0;
+      const earnedPoints = shouldScore && judgement.correct ? points : 0;
+
+      addCellToSummary_(summary, expectedCell, judgement, shouldScore, points, earnedPoints);
+      resultRows.push(resultRow_({
+        studentName: studentName,
+        url: submission.url,
+        scopeLabel: analysis.rule.scopeLabel,
+        unitName: analysis.rule.targetModeLabel,
+        answerSheetName: analysis.rule.answerSheetName,
+        studentSheetName: studentSheet.getName(),
+        cell: expectedCell.a1,
+        category: expectedCell.typeLabel,
+        judgementLabel: judgement.label,
+        correct: shouldScore ? judgement.correct : '',
+        points: points,
+        earnedPoints: earnedPoints,
+        expected: expectedCell.expectedDisplayValue,
+        actual: actualCell.displayValue,
+        expectedFormula: expectedCell.expectedFormulaR1C1,
+        actualFormula: actualCell.formulaR1C1,
+        detail: judgement.detail
+      }));
+    });
+  } catch (error) {
+    summary.errors.push(analysis.rule.answerSheetName + ': ' + error.message);
+    if (analysis.rule.scope === AUTO_GRADER.scope.scored) {
+      summary.possiblePoints += analysis.allocatedPoints;
+      summary.targetCells += analysis.targetCells.length;
+    }
+    resultRows.push(resultRow_({
+      studentName: studentName,
+      url: submission.url,
+      scopeLabel: analysis.rule.scopeLabel,
+      unitName: analysis.rule.targetModeLabel,
+      answerSheetName: analysis.rule.answerSheetName,
+      studentSheetName: analysis.rule.studentSheetName || analysis.rule.answerSheetName,
+      cell: '',
+      category: '',
+      judgementLabel: 'エラー',
+      correct: false,
+      points: analysis.allocatedPoints,
+      earnedPoints: 0,
+      expected: '',
+      actual: '',
+      expectedFormula: '',
+      actualFormula: '',
+      detail: error.message
+    }));
+  }
+}
+
+function gradeFreeformForSubmission_(spreadsheet, submission, studentName, rule, settings, summary, resultRows) {
+  try {
+    const judgement = evaluateFreeformRule_(spreadsheet, rule, settings);
+    const shouldScore = rule.scope === AUTO_GRADER.scope.scored;
+    const shouldOutput = shouldScore || settings.includeReferenceInResults;
+    const points = shouldScore ? rule.allocatedPoints : 0;
+    const earnedPoints = shouldScore && judgement.correct ? points : 0;
+
+    if (shouldScore) {
+      summary.targetChecks += 1;
+      summary.earnedPoints += earnedPoints;
+      summary.possiblePoints += points;
+      if (judgement.correct) {
+        summary.correctChecks += 1;
+      }
+    }
+
+    if (shouldOutput) {
+      resultRows.push(resultRow_({
+        studentName: studentName,
+        url: submission.url,
+        scopeLabel: rule.scopeLabel,
+        unitName: '自由課題チェック',
+        answerSheetName: '',
+        studentSheetName: rule.targetSheetSpec || 'すべて',
+        cell: '',
+        category: rule.checkTypeLabel,
+        judgementLabel: judgement.label,
+        correct: shouldScore ? judgement.correct : '',
+        points: points,
+        earnedPoints: earnedPoints,
+        expected: judgement.expected,
+        actual: judgement.actual,
+        expectedFormula: '',
+        actualFormula: '',
+        detail: judgement.detail
+      }));
+    }
+  } catch (error) {
+    summary.errors.push(rule.checkTypeLabel + ': ' + error.message);
+    if (rule.scope === AUTO_GRADER.scope.scored) {
+      summary.possiblePoints += rule.allocatedPoints;
+      summary.targetChecks += 1;
+    }
+    resultRows.push(resultRow_({
+      studentName: studentName,
+      url: submission.url,
+      scopeLabel: rule.scopeLabel,
+      unitName: '自由課題チェック',
+      answerSheetName: '',
+      studentSheetName: rule.targetSheetSpec || 'すべて',
+      cell: '',
+      category: rule.checkTypeLabel,
+      judgementLabel: 'エラー',
+      correct: false,
+      points: rule.allocatedPoints,
+      earnedPoints: 0,
+      expected: freeformExpectedLabel_(rule),
+      actual: '',
+      expectedFormula: '',
+      actualFormula: '',
+      detail: error.message
+    }));
+  }
+}
+
+function readSubmittedGrid_(sheet, bounds) {
+  const rows = Math.min(bounds.rowCount, sheet.getMaxRows());
+  const cols = Math.min(bounds.colCount, sheet.getMaxColumns());
+  return readGrid_(sheet, rows, cols);
+}
+
+function getGridCell_(grid, row, col) {
+  const r = row - 1;
+  const c = col - 1;
+  if (r < 0 || c < 0 || r >= grid.rowCount || c >= grid.colCount) {
+    return {
+      rawValue: '',
+      displayValue: '',
+      formulaR1C1: ''
+    };
+  }
+  return {
+    rawValue: grid.values[r][c],
+    displayValue: grid.displayValues[r][c],
+    formulaR1C1: grid.formulasR1C1[r][c]
+  };
+}
+
+function judgeCell_(expected, actual, settings) {
+  const actualHasFormula = hasText_(actual.formulaR1C1);
+  const actualIsBlank = !actualHasFormula && isBlankValue_(actual.rawValue, actual.displayValue);
+  const resultMatches = valuesEqual_(
+    expected.expectedRawValue,
+    expected.expectedDisplayValue,
+    actual.rawValue,
+    actual.displayValue,
+    settings.numericTolerance
+  );
+
+  if (expected.type === AUTO_GRADER.types.formula) {
+    if (actualIsBlank) {
+      return judgement_('BLANK', '空欄', false, '提出セルが空欄です。');
+    }
+    if (actualHasFormula && formulasEqual_(expected.expectedFormulaR1C1, actual.formulaR1C1)) {
+      return judgement_('FORMULA_MATCH', '数式一致', true, 'R1C1形式の数式が一致しました。');
+    }
+    if (actualHasFormula && resultMatches) {
+      return judgement_('RESULT_MATCH', '計算結果一致（数式違い）', settings.treatResultMatchAsCorrect, '数式は違いますが計算結果が一致しました。');
+    }
+    if (!actualHasFormula && resultMatches) {
+      return judgement_('DIRECT_INPUT', '直打ち', settings.treatDirectInputAsCorrect, '数式ではなく値が直接入力されています。');
+    }
+    return judgement_('MISMATCH', '不一致', false, '期待する数式または計算結果と一致しません。');
+  }
+
+  if (expected.type === AUTO_GRADER.types.value) {
+    if (actualIsBlank) {
+      return judgement_('BLANK', '空欄', false, '提出セルが空欄です。');
+    }
+    if (resultMatches && actualHasFormula) {
+      return judgement_('VALUE_MATCH_BY_FORMULA', '値一致（数式入力）', true, '期待値と一致しています。提出セルには数式があります。');
+    }
+    if (resultMatches) {
+      return judgement_('VALUE_MATCH', '値一致', true, '期待値と一致しました。');
+    }
+    return judgement_('MISMATCH', '不一致', false, '期待値と一致しません。');
+  }
+
+  if (expected.type === AUTO_GRADER.types.inputLike) {
+    if (actualIsBlank) {
+      return judgement_('INPUT_BLANK', '空欄', false, '入力欄候補ですが提出セルは空欄です。');
+    }
+    if (actualHasFormula) {
+      return judgement_('INPUT_WITH_FORMULA', '入力あり（数式）', true, '入力欄候補に数式があります。');
+    }
+    return judgement_('INPUT_WITH_VALUE', '入力あり（値）', true, '入力欄候補に値があります。');
+  }
+
+  if (actualIsBlank) {
+    return judgement_('BLANK_MATCH', '空欄一致', true, '模範解答も提出セルも空欄です。');
+  }
+  return judgement_('EXTRA_INPUT', '余分な入力', false, '模範解答では空欄ですが提出セルに入力があります。');
+}
+
+function evaluateFreeformRule_(spreadsheet, rule, settings) {
+  if (rule.checkType === AUTO_GRADER.checks.sheetCountMin) {
+    const expected = toPositiveInt_(rule.conditionValue, 1);
+    const actual = spreadsheet.getSheets().length;
+    return thresholdJudgement_(actual, expected, 'シート数');
+  }
+
+  if (rule.checkType === AUTO_GRADER.checks.requiredSheetExists) {
+    const sheetName = String(rule.conditionValue || rule.targetSheetSpec || '').trim();
+    if (!sheetName) {
+      throw new Error('指定シートありチェックには、対象シート指定または条件値にシート名が必要です。');
+    }
+    const exists = Boolean(spreadsheet.getSheetByName(sheetName));
+    return {
+      code: exists ? 'CHECK_PASS' : 'CHECK_FAIL',
+      label: exists ? '条件達成' : '条件未達',
+      correct: exists,
+      expected: 'シート「' + sheetName + '」が存在',
+      actual: exists ? '存在' : 'なし',
+      detail: exists ? '指定シートが見つかりました。' : '指定シートが見つかりません。'
+    };
+  }
+
+  const sheets = resolveSheetsBySpec_(spreadsheet, rule.targetSheetSpec);
+
+  if (rule.checkType === AUTO_GRADER.checks.chartCountMin) {
+    const expected = toPositiveInt_(rule.conditionValue, 1);
+    const actual = sheets.reduce(function(sum, sheet) {
+      return sum + sheet.getCharts().length;
+    }, 0);
+    return thresholdJudgement_(actual, expected, 'グラフ数');
+  }
+
+  if (rule.checkType === AUTO_GRADER.checks.formulaCountMin) {
+    const expected = toPositiveInt_(rule.conditionValue, 1);
+    const actual = countFormulaCells_(sheets, settings);
+    return thresholdJudgement_(actual, expected, '数式セル数');
+  }
+
+  if (rule.checkType === AUTO_GRADER.checks.nonEmptyCountMin) {
+    const expected = toPositiveInt_(rule.conditionValue, 1);
+    const actual = countNonEmptyCells_(sheets, settings);
+    return thresholdJudgement_(actual, expected, '入力セル数');
+  }
+
+  if (rule.checkType === AUTO_GRADER.checks.textContains) {
+    const keyword = String(rule.conditionValue || '').trim();
+    if (!keyword) {
+      throw new Error('テキストを含むチェックには条件値が必要です。');
+    }
+    const count = countTextContains_(sheets, settings, keyword);
+    const correct = count > 0;
+    return {
+      code: correct ? 'CHECK_PASS' : 'CHECK_FAIL',
+      label: correct ? '条件達成' : '条件未達',
+      correct: correct,
+      expected: '「' + keyword + '」を含むセルがある',
+      actual: count + '件',
+      detail: correct ? '指定テキストを含むセルが見つかりました。' : '指定テキストを含むセルが見つかりません。'
     };
   }
 
@@ -1177,4 +1804,3 @@ function notify_(message) {
     Logger.log(message);
   }
 }
-
