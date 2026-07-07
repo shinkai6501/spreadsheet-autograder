@@ -10,7 +10,7 @@
  */
 
 const AUTO_GRADER = Object.freeze({
-  version: '3.3.0',
+  version: '3.4.0',
   settingsSheet: '設定',
   specSheet: '採点仕様',
   resultSheets: Object.freeze({
@@ -79,7 +79,7 @@ function buildGradingSpec() {
   const answerSpreadsheet = SpreadsheetApp.openById(settings.answerSpreadsheetId);
   const spec = analyzeAnswerSpreadsheet_(answerSpreadsheet, settings);
   writeSpecSheet_(controller, answerSpreadsheet, spec);
-  notify_('採点仕様を生成しました。対象シート数: ' + spec.sheets.length + ' / 数式セル数: ' + spec.totalCells + ' / グラフ数: ' + spec.totalCharts);
+  notify_('採点仕様を生成しました。対象シート数: ' + spec.sheets.length + ' / 数式セル数: ' + spec.totalCells + ' / グラフ数: ' + spec.totalCharts + '\nこのメニューを再実行するまで、手入力した修正内容が採点に使われます。');
 }
 
 function runAutoGrader() {
@@ -87,10 +87,10 @@ function runAutoGrader() {
   const settings = readSettings_(controller);
   const folder = DriveApp.getFolderById(settings.submissionFolderId);
   const answerSpreadsheet = SpreadsheetApp.openById(settings.answerSpreadsheetId);
-  const spec = analyzeAnswerSpreadsheet_(answerSpreadsheet, settings);
+  const spec = loadGradingSpec_(controller, answerSpreadsheet, settings);
 
   if (spec.totalCells === 0 && spec.totalCharts === 0) {
-    throw new Error('模範解答に採点対象となる数式セルまたはグラフがありません。');
+    throw new Error('採点仕様シートに採点対象となる数式セルまたはグラフがありません。');
   }
 
   const excludedIds = {};
@@ -103,7 +103,6 @@ function runAutoGrader() {
 
   const grading = gradeSubmissionFiles_(submissionFiles, spec, settings);
   const result = createResultSpreadsheet_(folder, answerSpreadsheet, spec, grading, settings);
-  writeSpecSheet_(controller, answerSpreadsheet, spec);
   notify_('採点が完了しました。提出数: ' + submissionFiles.length + '\n結果: ' + result.getUrl());
 }
 
@@ -152,6 +151,177 @@ function readSettings_(controller) {
     outputDetails: toBool_(map['採点詳細を出力'], AUTO_GRADER.defaults.outputDetails),
     numericTolerance: toNumber_(map['数値許容誤差'], AUTO_GRADER.defaults.numericTolerance)
   };
+}
+
+function loadGradingSpec_(controller, answerSpreadsheet, settings) {
+  const sheet = controller.getSheetByName(AUTO_GRADER.specSheet);
+  if (!sheet) {
+    const generated = analyzeAnswerSpreadsheet_(answerSpreadsheet, settings);
+    writeSpecSheet_(controller, answerSpreadsheet, generated);
+    return generated;
+  }
+  return readSpecSheet_(sheet, settings);
+}
+
+function readSpecSheet_(sheet, settings) {
+  if (sheet.getLastRow() < 2) {
+    throw new Error('採点仕様シートに採点対象の行がありません。必要な行を入力するか、模範解答から採点仕様を再生成してください。');
+  }
+
+  const lastColumn = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0];
+  const headerMap = {};
+  headers.forEach(function(header, index) {
+    headerMap[String(header || '').trim()] = index;
+  });
+  const requiredHeaders = ['シート名', '対象種別', 'セル/グラフ', '期待数式R1C1', '期待値/グラフ条件', '配点'];
+  requiredHeaders.forEach(function(header) {
+    if (typeof headerMap[header] === 'undefined') {
+      throw new Error('採点仕様シートに必要な列「' + header + '」がありません。');
+    }
+  });
+
+  const rowCount = sheet.getLastRow() - 1;
+  const dataRange = sheet.getRange(2, 1, rowCount, lastColumn);
+  const values = dataRange.getValues();
+  const displayValues = dataRange.getDisplayValues();
+  const enteredFormulas = dataRange.getFormulasR1C1();
+  const sheets = [];
+  const sheetMap = {};
+  let totalCells = 0;
+  let totalCharts = 0;
+  let totalWeight = 0;
+
+  values.forEach(function(row, rowIndex) {
+    const displayRow = displayValues[rowIndex];
+    const sheetName = String(displayRow[headerMap['シート名']] || '').trim();
+    const kind = String(displayRow[headerMap['対象種別']] || '').trim();
+    const target = String(displayRow[headerMap['セル/グラフ']] || '').trim();
+    if (!sheetName && !kind && !target) {
+      return;
+    }
+    if (!sheetName || !kind || !target) {
+      throw new Error('採点仕様シートの' + (rowIndex + 2) + '行目に未入力の必須項目があります。');
+    }
+
+    const pointValue = parseFloat(row[headerMap['配点']]);
+    if (!isFinite(pointValue) || pointValue < 0) {
+      throw new Error('採点仕様シートの' + (rowIndex + 2) + '行目の配点は0以上の数値で入力してください。');
+    }
+
+    let sheetSpec = sheetMap[sheetName];
+    if (!sheetSpec) {
+      sheetSpec = {
+        name: sheetName,
+        rowCount: 1,
+        colCount: 1,
+        cells: [],
+        charts: []
+      };
+      sheetMap[sheetName] = sheetSpec;
+      sheets.push(sheetSpec);
+    }
+
+    if (kind === '数式') {
+      const position = parseA1_(target, rowIndex + 2);
+      const formulaColumn = headerMap['期待数式R1C1'];
+      const formula = specFormulaText_(enteredFormulas[rowIndex][formulaColumn] || row[formulaColumn] || displayRow[formulaColumn]);
+      if (!formula) {
+        throw new Error('採点仕様シートの' + (rowIndex + 2) + '行目に期待数式R1C1を入力してください。');
+      }
+      sheetSpec.cells.push({
+        row: position.row,
+        col: position.col,
+        a1: toA1_(position.row, position.col),
+        formulaR1C1: formula,
+        rawValue: row[headerMap['期待値/グラフ条件']],
+        displayValue: displayRow[headerMap['期待値/グラフ条件']],
+        point: pointValue
+      });
+      sheetSpec.rowCount = Math.max(sheetSpec.rowCount, position.row);
+      sheetSpec.colCount = Math.max(sheetSpec.colCount, position.col);
+      totalCells++;
+    } else if (kind === 'グラフ') {
+      const condition = String(displayRow[headerMap['期待値/グラフ条件']] || '').trim();
+      const chartType = chartTypeFromSpec_(condition);
+      if (!chartType) {
+        throw new Error('採点仕様シートの' + (rowIndex + 2) + '行目にグラフ種類を入力してください。');
+      }
+      sheetSpec.charts.push({
+        index: sheetSpec.charts.length + 1,
+        type: chartType,
+        ranges: [],
+        title: '',
+        horizontalAxisTitle: '',
+        verticalAxisTitle: '',
+        legendPosition: '',
+        numHeaders: 0,
+        transpose: false,
+        mergeStrategy: '',
+        point: pointValue
+      });
+      totalCharts++;
+    } else {
+      throw new Error('採点仕様シートの' + (rowIndex + 2) + '行目の対象種別は「数式」または「グラフ」にしてください。');
+    }
+    totalWeight += pointValue;
+  });
+
+  if (totalCells === 0 && totalCharts === 0) {
+    throw new Error('採点仕様シートに有効な採点対象がありません。');
+  }
+  if (totalWeight <= 0) {
+    throw new Error('採点仕様シートの配点合計を0より大きくしてください。');
+  }
+
+  const scale = settings.totalScore / totalWeight;
+  let formulaScore = 0;
+  let chartScore = 0;
+  sheets.forEach(function(sheetSpec) {
+    sheetSpec.cells.forEach(function(cell) {
+      cell.point *= scale;
+      formulaScore += cell.point;
+    });
+    sheetSpec.charts.forEach(function(chart) {
+      chart.point *= scale;
+      chartScore += chart.point;
+    });
+  });
+
+  return {
+    sheets: sheets,
+    totalCells: totalCells,
+    totalCharts: totalCharts,
+    pointPerCell: totalCells > 0 ? formulaScore / totalCells : 0,
+    pointPerChart: totalCharts > 0 ? chartScore / totalCharts : 0,
+    formulaScore: formulaScore,
+    chartScore: chartScore,
+    totalScore: settings.totalScore,
+    source: '採点仕様シート（手入力を反映）'
+  };
+}
+
+function chartTypeFromSpec_(condition) {
+  const text = String(condition || '').trim();
+  const match = text.match(/(?:^|;)\s*種類\s*=\s*([^;]+)/);
+  return String(match ? match[1] : text).trim();
+}
+
+function specFormulaText_(value) {
+  const text = String(value || '').trim();
+  return text.indexOf("'=") === 0 ? text.substring(1) : text;
+}
+
+function parseA1_(a1, rowNumber) {
+  const match = String(a1 || '').trim().toUpperCase().match(/^\$?([A-Z]+)\$?(\d+)$/);
+  if (!match) {
+    throw new Error('採点仕様シートの' + rowNumber + '行目のセル指定「' + a1 + '」をA1形式で入力してください。');
+  }
+  let col = 0;
+  for (let i = 0; i < match[1].length; i++) {
+    col = col * 26 + match[1].charCodeAt(i) - 64;
+  }
+  return { row: parseInt(match[2], 10), col: col };
 }
 
 function analyzeAnswerSpreadsheet_(spreadsheet, settings) {
@@ -241,7 +411,8 @@ function analyzeAnswerSpreadsheet_(spreadsheet, settings) {
     pointPerChart: pointPerChart,
     formulaScore: formulaScore,
     chartScore: chartScore,
-    totalScore: settings.totalScore
+    totalScore: settings.totalScore,
+    source: '模範解答から自動生成'
   };
 }
 
@@ -748,6 +919,7 @@ function writeInfoSheet_(sheet, folder, answerSpreadsheet, spec, grading, settin
     ['グラフ配点', spec.chartScore],
     ['1セル配点', spec.pointPerCell],
     ['1グラフ配点', spec.pointPerChart],
+    ['採点仕様の取得元', spec.source || '模範解答から自動生成'],
     ['採点ファイル数', grading.summaries.length],
     ['対象シート名', spec.sheets.map(function(item) { return item.name; }).join(', ')]
   ];
@@ -786,7 +958,15 @@ function writeSpecSheet_(controller, answerSpreadsheet, spec) {
   });
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   if (rows.length > 0) {
-    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    const outputRows = rows.map(function(row) {
+      const output = row.slice();
+      if (output[2] === '数式' && String(output[4] || '').charAt(0) === '=') {
+        output[4] = "'" + output[4];
+      }
+      return output;
+    });
+    sheet.getRange(2, 5, rows.length, 1).setNumberFormat('@');
+    sheet.getRange(2, 1, rows.length, headers.length).setValues(outputRows);
     sheet.getRange(2, 7, rows.length, 1).setNumberFormat('0.000');
   }
   formatOutputSheet_(sheet, headers.length, '#fff2cc');
