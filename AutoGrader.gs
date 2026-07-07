@@ -10,7 +10,7 @@
  */
 
 const AUTO_GRADER = Object.freeze({
-  version: '3.1.0',
+  version: '3.2.0',
   settingsSheet: '設定',
   specSheet: '採点仕様',
   resultSheets: Object.freeze({
@@ -21,7 +21,7 @@ const AUTO_GRADER = Object.freeze({
   resultMarker: '[SpreadsheetAutoGraderResult]',
   defaults: Object.freeze({
     resultFileName: 'スプレッドシート課題_採点結果',
-    totalScore: 50,
+    totalScore: 10,
     chartScoreRatio: 0.3,
     searchSubfolders: true,
     includeHiddenAnswerSheets: true,
@@ -53,8 +53,8 @@ function setupAutoGrader() {
     ['提出物フォルダURL', '', 'Classroomが課題用に作成したGoogle DriveフォルダのURLです。'],
     ['模範解答スプレッドシートURL', '', '数式が入力済みの模範解答スプレッドシートURLです。'],
     ['結果ファイル名', AUTO_GRADER.defaults.resultFileName, '実行日時を末尾に付けた新しいスプレッドシートを提出フォルダ内へ作ります。'],
-    ['総点', AUTO_GRADER.defaults.totalScore, '数式とグラフを合わせた満点です。初期値は50点です。'],
-    ['グラフ配点割合', AUTO_GRADER.defaults.chartScoreRatio, '模範解答にグラフがある場合の配点割合です。0.3なら50点中15点です。'],
+    ['総点', AUTO_GRADER.defaults.totalScore, '数式とグラフを合わせた満点です。初期値は10点です。'],
+    ['グラフ配点割合', AUTO_GRADER.defaults.chartScoreRatio, '模範解答にグラフがある場合の配点割合です。0.3なら10点中3点です。'],
     ['サブフォルダも検索', AUTO_GRADER.defaults.searchSubfolders, 'TRUEなら提出フォルダ配下も再帰的に検索します。'],
     ['非表示の模範解答シートも採点', AUTO_GRADER.defaults.includeHiddenAnswerSheets, 'TRUEなら非表示シートも同名シートと照合します。'],
     ['採点対象外シート名', AUTO_GRADER.defaults.excludedSheetNames, '採点しないシート名をカンマ区切りで入力します。空欄なら全シートです。'],
