@@ -10,7 +10,7 @@
  */
 
 const AUTO_GRADER = Object.freeze({
-  version: '3.0.0',
+  version: '3.1.0',
   settingsSheet: '設定',
   specSheet: '採点仕様',
   resultSheets: Object.freeze({
@@ -21,11 +21,12 @@ const AUTO_GRADER = Object.freeze({
   resultMarker: '[SpreadsheetAutoGraderResult]',
   defaults: Object.freeze({
     resultFileName: 'スプレッドシート課題_採点結果',
-    totalScore: 100,
+    totalScore: 50,
+    chartScoreRatio: 0.3,
     searchSubfolders: true,
     includeHiddenAnswerSheets: true,
     excludedSheetNames: '',
-    treatResultMatchAsCorrect: true,
+    treatResultMatchAsCorrect: false,
     treatDirectInputAsCorrect: false,
     outputDetails: true,
     numericTolerance: 1e-9
@@ -52,7 +53,8 @@ function setupAutoGrader() {
     ['提出物フォルダURL', '', 'Classroomが課題用に作成したGoogle DriveフォルダのURLです。'],
     ['模範解答スプレッドシートURL', '', '数式が入力済みの模範解答スプレッドシートURLです。'],
     ['結果ファイル名', AUTO_GRADER.defaults.resultFileName, '実行日時を末尾に付けた新しいスプレッドシートを提出フォルダ内へ作ります。'],
-    ['総点', AUTO_GRADER.defaults.totalScore, '模範解答内の全数式セルへ均等配点します。'],
+    ['総点', AUTO_GRADER.defaults.totalScore, '数式とグラフを合わせた満点です。初期値は50点です。'],
+    ['グラフ配点割合', AUTO_GRADER.defaults.chartScoreRatio, '模範解答にグラフがある場合の配点割合です。0.3なら50点中15点です。'],
     ['サブフォルダも検索', AUTO_GRADER.defaults.searchSubfolders, 'TRUEなら提出フォルダ配下も再帰的に検索します。'],
     ['非表示の模範解答シートも採点', AUTO_GRADER.defaults.includeHiddenAnswerSheets, 'TRUEなら非表示シートも同名シートと照合します。'],
     ['採点対象外シート名', AUTO_GRADER.defaults.excludedSheetNames, '採点しないシート名をカンマ区切りで入力します。空欄なら全シートです。'],
@@ -64,8 +66,8 @@ function setupAutoGrader() {
 
   sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
   sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold').setBackground('#d9ead3');
-  sheet.getRange(6, 2, 2, 1).insertCheckboxes();
-  sheet.getRange(9, 2, 3, 1).insertCheckboxes();
+  sheet.getRange(7, 2, 2, 1).insertCheckboxes();
+  sheet.getRange(10, 2, 3, 1).insertCheckboxes();
   sheet.setFrozenRows(1);
   sheet.autoResizeColumns(1, rows[0].length);
   notify_('設定シートを作成しました。提出物フォルダURLと模範解答スプレッドシートURLを入力してください。');
@@ -77,7 +79,7 @@ function buildGradingSpec() {
   const answerSpreadsheet = SpreadsheetApp.openById(settings.answerSpreadsheetId);
   const spec = analyzeAnswerSpreadsheet_(answerSpreadsheet, settings);
   writeSpecSheet_(controller, answerSpreadsheet, spec);
-  notify_('採点仕様を生成しました。対象シート数: ' + spec.sheets.length + ' / 数式セル数: ' + spec.totalCells);
+  notify_('採点仕様を生成しました。対象シート数: ' + spec.sheets.length + ' / 数式セル数: ' + spec.totalCells + ' / グラフ数: ' + spec.totalCharts);
 }
 
 function runAutoGrader() {
@@ -87,8 +89,8 @@ function runAutoGrader() {
   const answerSpreadsheet = SpreadsheetApp.openById(settings.answerSpreadsheetId);
   const spec = analyzeAnswerSpreadsheet_(answerSpreadsheet, settings);
 
-  if (spec.totalCells === 0) {
-    throw new Error('模範解答に採点対象となる数式セルがありません。');
+  if (spec.totalCells === 0 && spec.totalCharts === 0) {
+    throw new Error('模範解答に採点対象となる数式セルまたはグラフがありません。');
   }
 
   const excludedIds = {};
@@ -141,6 +143,7 @@ function readSettings_(controller) {
     answerSpreadsheetId: extractDriveId_(answerUrl, 'spreadsheets/d'),
     resultFileName: String(map['結果ファイル名'] || AUTO_GRADER.defaults.resultFileName).trim(),
     totalScore: toPositiveNumber_(map['総点'], AUTO_GRADER.defaults.totalScore),
+    chartScoreRatio: toRatio_(map['グラフ配点割合'], AUTO_GRADER.defaults.chartScoreRatio),
     searchSubfolders: toBool_(map['サブフォルダも検索'], AUTO_GRADER.defaults.searchSubfolders),
     includeHiddenAnswerSheets: toBool_(map['非表示の模範解答シートも採点'], AUTO_GRADER.defaults.includeHiddenAnswerSheets),
     excludedSheetNames: parseNameList_(map['採点対象外シート名']),
@@ -159,6 +162,7 @@ function analyzeAnswerSpreadsheet_(spreadsheet, settings) {
 
   const sheets = [];
   let totalCells = 0;
+  let totalCharts = 0;
   spreadsheet.getSheets().forEach(function(sheet) {
     if (excluded[sheet.getName()]) {
       return;
@@ -169,57 +173,113 @@ function analyzeAnswerSpreadsheet_(spreadsheet, settings) {
 
     const lastRow = sheet.getLastRow();
     const lastCol = sheet.getLastColumn();
-    if (lastRow < 1 || lastCol < 1) {
-      return;
-    }
-
-    const range = sheet.getRange(1, 1, lastRow, lastCol);
-    const formulas = range.getFormulasR1C1();
-    const values = range.getValues();
-    const displayValues = range.getDisplayValues();
     const cells = [];
+    if (lastRow >= 1 && lastCol >= 1) {
+      const range = sheet.getRange(1, 1, lastRow, lastCol);
+      const formulas = range.getFormulasR1C1();
+      const values = range.getValues();
+      const displayValues = range.getDisplayValues();
 
-    for (let r = 0; r < lastRow; r++) {
-      for (let c = 0; c < lastCol; c++) {
-        if (!hasText_(formulas[r][c])) {
-          continue;
+      for (let r = 0; r < lastRow; r++) {
+        for (let c = 0; c < lastCol; c++) {
+          if (!hasText_(formulas[r][c])) {
+            continue;
+          }
+          cells.push({
+            row: r + 1,
+            col: c + 1,
+            a1: toA1_(r + 1, c + 1),
+            formulaR1C1: formulas[r][c],
+            rawValue: values[r][c],
+            displayValue: displayValues[r][c],
+            point: 0
+          });
         }
-        cells.push({
-          row: r + 1,
-          col: c + 1,
-          a1: toA1_(r + 1, c + 1),
-          formulaR1C1: formulas[r][c],
-          rawValue: values[r][c],
-          displayValue: displayValues[r][c],
-          point: 0
-        });
       }
     }
 
-    if (cells.length > 0) {
+    const charts = analyzeCharts_(sheet);
+    if (cells.length > 0 || charts.length > 0) {
       sheets.push({
         name: sheet.getName(),
-        rowCount: lastRow,
-        colCount: lastCol,
-        cells: cells
+        rowCount: Math.max(1, lastRow),
+        colCount: Math.max(1, lastCol),
+        cells: cells,
+        charts: charts
       });
       totalCells += cells.length;
+      totalCharts += charts.length;
     }
   });
 
-  const pointPerCell = totalCells > 0 ? settings.totalScore / totalCells : 0;
+  let formulaScore = settings.totalScore;
+  let chartScore = 0;
+  if (totalCells > 0 && totalCharts > 0) {
+    chartScore = settings.totalScore * settings.chartScoreRatio;
+    formulaScore = settings.totalScore - chartScore;
+  } else if (totalCells === 0 && totalCharts > 0) {
+    formulaScore = 0;
+    chartScore = settings.totalScore;
+  }
+
+  const pointPerCell = totalCells > 0 ? formulaScore / totalCells : 0;
+  const pointPerChart = totalCharts > 0 ? chartScore / totalCharts : 0;
   sheets.forEach(function(sheetSpec) {
     sheetSpec.cells.forEach(function(cell) {
       cell.point = pointPerCell;
+    });
+    sheetSpec.charts.forEach(function(chart) {
+      chart.point = pointPerChart;
     });
   });
 
   return {
     sheets: sheets,
     totalCells: totalCells,
+    totalCharts: totalCharts,
     pointPerCell: pointPerCell,
+    pointPerChart: pointPerChart,
+    formulaScore: formulaScore,
+    chartScore: chartScore,
     totalScore: settings.totalScore
   };
+}
+
+function analyzeCharts_(sheet) {
+  return sheet.getCharts().map(function(chart, index) {
+    const options = chart.getOptions();
+    return {
+      index: index + 1,
+      type: String(chart.modify().getChartType()),
+      ranges: chart.getRanges().map(function(range) {
+        return {
+          rowCount: range.getNumRows(),
+          colCount: range.getNumColumns(),
+          data: range.getDisplayValues()
+        };
+      }),
+      title: chartOptionText_(options, 'title'),
+      horizontalAxisTitle: chartOptionText_(options, 'hAxis.title'),
+      verticalAxisTitle: chartOptionText_(options, 'vAxis.title'),
+      legendPosition: chartOptionText_(options, 'legend.position'),
+      numHeaders: chart.getNumHeaders(),
+      transpose: chart.getTransposeRowsAndColumns(),
+      mergeStrategy: String(chart.getMergeStrategy()),
+      point: 0
+    };
+  });
+}
+
+function chartOptionText_(options, key) {
+  try {
+    const value = options.get(key);
+    if (value === null || typeof value === 'undefined') {
+      return '';
+    }
+    return typeof value === 'object' ? JSON.stringify(value) : String(value).trim();
+  } catch (error) {
+    return '';
+  }
 }
 
 function collectSubmissionFiles_(rootFolder, recursive, excludedIds) {
@@ -291,11 +351,14 @@ function createSummary_(file, spec) {
     rate: '',
     targetCells: spec.totalCells,
     correctCells: 0,
+    targetCharts: spec.totalCharts,
+    correctCharts: 0,
     formulaMatches: 0,
     resultMatches: 0,
     directInputs: 0,
     blanks: 0,
     mismatches: 0,
+    chartMismatches: 0,
     missingSheets: [],
     errors: []
   };
@@ -306,10 +369,20 @@ function gradeSheet_(submission, file, sheetSpec, settings, summary, details) {
   if (!sheet) {
     summary.missingSheets.push(sheetSpec.name);
     summary.mismatches += sheetSpec.cells.length;
+    summary.chartMismatches += sheetSpec.charts.length;
     sheetSpec.cells.forEach(function(expected) {
       if (settings.outputDetails) {
         details.push(detailRow_(file, sheetSpec.name, expected, emptyActualCell_(), {
           code: 'MISSING_SHEET',
+          label: 'シートなし',
+          correct: false,
+          detail: '提出ファイルに同名シートがありません。'
+        }));
+      }
+    });
+    sheetSpec.charts.forEach(function(expectedChart) {
+      if (settings.outputDetails) {
+        details.push(chartDetailRow_(file, sheetSpec.name, expectedChart, null, {
           label: 'シートなし',
           correct: false,
           detail: '提出ファイルに同名シートがありません。'
@@ -332,6 +405,123 @@ function gradeSheet_(submission, file, sheetSpec, settings, summary, details) {
       details.push(detailRow_(file, sheetSpec.name, expected, actual, judgement));
     }
   });
+  gradeCharts_(sheet, file, sheetSpec, settings, summary, details);
+}
+
+function gradeCharts_(sheet, file, sheetSpec, settings, summary, details) {
+  const actualCharts = analyzeCharts_(sheet);
+  const unused = actualCharts.map(function(chart, index) {
+    return { chart: chart, index: index };
+  });
+
+  sheetSpec.charts.forEach(function(expectedChart) {
+    let bestPosition = -1;
+    let bestComparison = null;
+    unused.forEach(function(candidate, position) {
+      const comparison = compareCharts_(expectedChart, candidate.chart);
+      if (!bestComparison || comparison.matchCount > bestComparison.matchCount) {
+        bestPosition = position;
+        bestComparison = comparison;
+      }
+    });
+
+    let actualChart = null;
+    let judgement;
+    if (bestPosition === -1) {
+      judgement = {
+        label: 'グラフなし',
+        correct: false,
+        detail: '対応する提出グラフがありません。'
+      };
+    } else {
+      actualChart = unused[bestPosition].chart;
+      unused.splice(bestPosition, 1);
+      judgement = {
+        label: bestComparison.correct ? 'グラフ一致' : 'グラフ不一致',
+        correct: bestComparison.correct,
+        detail: bestComparison.detail
+      };
+    }
+
+    if (judgement.correct) {
+      summary.correctCharts += 1;
+      summary.score += expectedChart.point;
+    } else {
+      summary.chartMismatches += 1;
+    }
+    if (settings.outputDetails) {
+      details.push(chartDetailRow_(file, sheetSpec.name, expectedChart, actualChart, judgement));
+    }
+  });
+}
+
+function compareCharts_(expected, actual) {
+  const checks = [
+    ['種類', expected.type === actual.type],
+    ['データ範囲', chartRangesEqual_(expected.ranges, actual.ranges)],
+    ['タイトル', expected.title === actual.title],
+    ['横軸タイトル', expected.horizontalAxisTitle === actual.horizontalAxisTitle],
+    ['縦軸タイトル', expected.verticalAxisTitle === actual.verticalAxisTitle],
+    ['凡例位置', expected.legendPosition === actual.legendPosition],
+    ['ヘッダー数', expected.numHeaders === actual.numHeaders],
+    ['行列転置', expected.transpose === actual.transpose],
+    ['範囲結合方法', expected.mergeStrategy === actual.mergeStrategy]
+  ];
+  const failures = checks.filter(function(check) { return !check[1]; }).map(function(check) { return check[0]; });
+  return {
+    correct: failures.length === 0,
+    matchCount: checks.length - failures.length,
+    detail: failures.length === 0 ? 'グラフ構造が模範解答と一致しました。' : '不一致項目: ' + failures.join(', ')
+  };
+}
+
+function chartRangesEqual_(expectedRanges, actualRanges) {
+  if (expectedRanges.length !== actualRanges.length) {
+    return false;
+  }
+  for (let i = 0; i < expectedRanges.length; i++) {
+    const expected = expectedRanges[i];
+    const actual = actualRanges[i];
+    if (expected.rowCount !== actual.rowCount || expected.colCount !== actual.colCount) {
+      return false;
+    }
+    if (JSON.stringify(expected.data) !== JSON.stringify(actual.data)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function chartDetailRow_(file, sheetName, expected, actual, judgement) {
+  return [
+    file.getName(),
+    file.getUrl(),
+    sheetName,
+    'グラフ' + expected.index,
+    judgement.label,
+    judgement.correct,
+    expected.point,
+    judgement.correct ? expected.point : 0,
+    '',
+    '',
+    chartDescription_(expected),
+    actual ? chartDescription_(actual) : '',
+    judgement.detail
+  ];
+}
+
+function chartDescription_(chart) {
+  const rangeShapes = chart.ranges.map(function(range) {
+    return range.rowCount + 'x' + range.colCount;
+  }).join(',');
+  return [
+    '種類=' + chart.type,
+    '範囲=' + rangeShapes,
+    'タイトル=' + chart.title,
+    '横軸=' + chart.horizontalAxisTitle,
+    '縦軸=' + chart.verticalAxisTitle,
+    '凡例=' + chart.legendPosition
+  ].join('; ');
 }
 
 function readSubmissionGrid_(sheet, expectedRows, expectedCols) {
@@ -483,6 +673,9 @@ function writeSummarySheet_(sheet, summaries) {
     '得点率',
     '採点対象セル数',
     '正答数',
+    '採点対象グラフ数',
+    'グラフ一致',
+    'グラフ不一致',
     '数式一致',
     '計算結果一致',
     '直打ち',
@@ -500,6 +693,9 @@ function writeSummarySheet_(sheet, summaries) {
       summary.rate,
       summary.targetCells,
       summary.correctCells,
+      summary.targetCharts,
+      summary.correctCharts,
+      summary.chartMismatches,
       summary.formulaMatches,
       summary.resultMatches,
       summary.directInputs,
@@ -555,8 +751,12 @@ function writeInfoSheet_(sheet, folder, answerSpreadsheet, spec, grading, settin
     ['模範解答URL', settings.answerUrl],
     ['採点対象シート数', spec.sheets.length],
     ['採点対象数式セル数', spec.totalCells],
+    ['採点対象グラフ数', spec.totalCharts],
     ['総点', spec.totalScore],
+    ['数式配点', spec.formulaScore],
+    ['グラフ配点', spec.chartScore],
     ['1セル配点', spec.pointPerCell],
+    ['1グラフ配点', spec.pointPerChart],
     ['採点ファイル数', grading.summaries.length],
     ['対象シート名', spec.sheets.map(function(item) { return item.name; }).join(', ')]
   ];
@@ -567,24 +767,36 @@ function writeInfoSheet_(sheet, folder, answerSpreadsheet, spec, grading, settin
 function writeSpecSheet_(controller, answerSpreadsheet, spec) {
   const sheet = ensureSheet_(controller, AUTO_GRADER.specSheet);
   sheet.clear();
-  const headers = ['模範解答', 'シート名', 'セル', '期待数式R1C1', '期待値', '配点'];
+  const headers = ['模範解答', 'シート名', '対象種別', 'セル/グラフ', '期待数式R1C1', '期待値/グラフ条件', '配点'];
   const rows = [];
   spec.sheets.forEach(function(sheetSpec) {
     sheetSpec.cells.forEach(function(cell) {
       rows.push([
         answerSpreadsheet.getName(),
         sheetSpec.name,
+        '数式',
         cell.a1,
         cell.formulaR1C1,
         cell.displayValue,
         cell.point
       ]);
     });
+    sheetSpec.charts.forEach(function(chart) {
+      rows.push([
+        answerSpreadsheet.getName(),
+        sheetSpec.name,
+        'グラフ',
+        'グラフ' + chart.index,
+        '',
+        chartDescription_(chart),
+        chart.point
+      ]);
+    });
   });
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   if (rows.length > 0) {
     sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
-    sheet.getRange(2, 6, rows.length, 1).setNumberFormat('0.000');
+    sheet.getRange(2, 7, rows.length, 1).setNumberFormat('0.000');
   }
   formatOutputSheet_(sheet, headers.length, '#fff2cc');
 }
@@ -727,6 +939,11 @@ function toBool_(value, defaultValue) {
 function toPositiveNumber_(value, defaultValue) {
   const parsed = parseFloat(value);
   return isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+function toRatio_(value, defaultValue) {
+  const parsed = parseFloat(value);
+  return isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : defaultValue;
 }
 
 function toNumber_(value, defaultValue) {
