@@ -10,7 +10,7 @@
  */
 
 const AUTO_GRADER = Object.freeze({
-  version: '3.2.0',
+  version: '3.3.0',
   settingsSheet: '設定',
   specSheet: '採点仕様',
   resultSheets: Object.freeze({
@@ -456,22 +456,13 @@ function gradeCharts_(sheet, file, sheetSpec, settings, summary, details) {
 }
 
 function compareCharts_(expected, actual) {
-  const checks = [
-    ['種類', expected.type === actual.type],
-    ['データ範囲', chartRangesEqual_(expected.ranges, actual.ranges)],
-    ['タイトル', expected.title === actual.title],
-    ['横軸タイトル', expected.horizontalAxisTitle === actual.horizontalAxisTitle],
-    ['縦軸タイトル', expected.verticalAxisTitle === actual.verticalAxisTitle],
-    ['凡例位置', expected.legendPosition === actual.legendPosition],
-    ['ヘッダー数', expected.numHeaders === actual.numHeaders],
-    ['行列転置', expected.transpose === actual.transpose],
-    ['範囲結合方法', expected.mergeStrategy === actual.mergeStrategy]
-  ];
-  const failures = checks.filter(function(check) { return !check[1]; }).map(function(check) { return check[0]; });
+  const typeMatches = expected.type === actual.type;
   return {
-    correct: failures.length === 0,
-    matchCount: checks.length - failures.length,
-    detail: failures.length === 0 ? 'グラフ構造が模範解答と一致しました。' : '不一致項目: ' + failures.join(', ')
+    correct: typeMatches,
+    matchCount: typeMatches ? 1 : 0,
+    detail: typeMatches
+      ? 'グラフの種類が模範解答と一致しました。'
+      : 'グラフの種類が不一致です。期待=' + expected.type + ', 提出=' + actual.type
   };
 }
 
